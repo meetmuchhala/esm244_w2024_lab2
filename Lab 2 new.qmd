@@ -1,0 +1,215 @@
+---
+title: "Lab 2 - Time Series"
+author: "Meet Muchhala"
+format: 
+  html:
+    code-fold: show
+    toc: true
+    number-sections: true
+editor: visual
+execute: 
+  echo: true
+  message: false
+  warning: false
+---
+
+```{r}
+
+library(tidyverse)
+library(here)
+library(tsibble)
+library(feasts)
+library(fable)
+```
+
+# Part 1: Time series with toolik Lake data
+
+## Always look at your data
+
+### Read in the data
+
+```{r}
+
+toolik_df <- read_csv(here('data/toolik_daily.csv'))
+
+ggplot(toolik_df, aes(x = date, y = daily_air_temp)) + geom_line()
+```
+
+```{r}
+toolik_ts <- toolik_df %>% 
+  mutate(date = lubridate::mdy(date)) %>% 
+  as_tsibble(key = NULL, ### if we had multiple obs on same date from diff locations
+             index = date) ### time index, here our column is `date`
+```
+
+
+
+```{r}
+
+ggplot(data = toolik_ts, aes(x = date, y = daily_air_temp)) +
+  geom_line() +
+  labs(x = "Date",
+       y = "Mean daily air temperature (Celsius)\n at Toolik Station")
+```
+## Use filter_index() function to filter by date/time!
+
+```{r}
+toolik_ts %>% 
+  filter_index("2020-12-20" ~ .)
+```
+
+
+## Use index_by() to aggregate time series by increments, here it is allowing in smoothing the gpplot above by consolidating the values into monthly averages
+
+```{r}
+
+toolik_month <- toolik_ts %>% 
+  index_by(yr_mo = ~yearmonth(.)) %>% 
+  summarize(monthly_mean_temp = mean(daily_air_temp, na.rm = TRUE)) %>% 
+  ungroup()
+```
+
+
+## Now let's plot this!
+
+```{r}
+
+library(lubridate)
+ggplot(data = toolik_month, aes(x = yr_mo, y = monthly_mean_temp)) + geom_line()
+
+ggplot(toolik_month, aes(x = year(yr_mo), y = monthly_mean_temp)) + geom_line() +
+  facet_wrap(~ month(yr_mo, label = TRUE)) +
+  labs(x = 'Year', y = 'Annual mean air temp (Celsius)', title = 'Toolik Station mean annual air temperature',           subtitle = '1988-2023',
+  caption = '<put citation here>')
+```
+
+# Part 2: time series wrangling and forecasting
+
+Dataset: U.S. Residential Energy Consumption (Jan 1973 - Sep 2023)
+
+Units: Trillion BTU
+
+```{r}
+energy_df <- read_csv(here("data", "energy.csv"))
+```
+
+
+### Analysis goals
+
+- Examine patterns and trends in resideential energy consumption over time
+- Predict what residential energy use patterns will look like over next 5 years
+
+### Pseudocode
+
+- Exploratory analysis using ggplot to check for seasonality
+- Check for residual data (normality, variance, mean and something)
+- Check for linear regression curve to observe the trend
+- define alpha and determine the prediction model code
+
+
+```{r}
+
+energy_ts <- energy_df %>% 
+  mutate(date = tsibble::yearmonth(yrmonth)) %>% ## use tsibble here instead of lubridate since it allocate month cateogry to the date variable. You can check using glimpse fucntion and entering energy_ts as the df
+  as_tsibble(key = sector, 
+             index = date) ##here key is equal to sector since there are various repeating month and year but for different sector of energy consumers, so it gives clarity to R
+
+```
+
+```{r}
+
+ggplot(energy_ts, aes(x = date, y = energy_total, color = sector)) + geom_line() +
+  labs(x = 'Year and month of energy consumption', y = 'Energy consumption by sector in trillion btus', title = 'Energy Consumption in the United States by Sector', caption = '<US Department of Energy source>') + facet_wrap(~ sector, ncol = 1)
+```
+* residential looks similar to commercial, with an upward trend at least for the first part, maybe leveling off or decreasing in recent years.
+* Seasonality - summer and winter peaks, summer peaks to be getting larger over time
+
+### Season plots
+```{r}
+## gg season is in feasts which is feature extraction for time series
+energy_ts %>% 
+  filter(sector == 'residential') %>% 
+  gg_season( y = energy_total, pal = hcl.colors(n = 9)) +
+  theme_light() +
+  labs(x = 'Month', y = 'residential energy consumption (trillion btu)' )
+
+```
+
+
+### Subseries plot
+
+```{r}
+energy_ts %>% 
+  gg_subseries(y = energy_total)
+```
+
+
+# Find STL decomposition
+dcmp <- energy_ts %>%
+  filter(sector == 'residential') %>%
+  model(feasts::STL(energy_total ~ season(period = '1 year') + trend(window = 25)))
+
+# View the components
+# components(dcmp)
+
+# Visualize the decomposed components
+components(dcmp) %>% 
+  autoplot() +
+  theme_minimal()
+```{r}
+# Find STL decomposition
+dcmp <- energy_ts %>%
+  filter(sector == 'residential') %>%
+  model(feasts::STL(energy_total ~ season(period = '1 year') + trend(window = 25)))
+
+# View the components
+# components(dcmp)
+
+# Visualize the decomposed components
+components(dcmp) %>% 
+  autoplot() +
+  theme_minimal()
+```
+
+
+### Autocorrelation function
+
+```{r}
+
+energy_ts %>% 
+  filter(sector == 'residential') %>% 
+  ACF(energy_total) %>% 
+  autoplot()
+```
+
+## Forecasting by Holt Winters exponential smoothing
+
+Specify for each compoenent, whether none ("n"), additive ("A") or multiplicative 
+("M)
+```{r}
+### Create model 
+
+energy_fit <- energy_ts %>% 
+  filter(sector == 'residential') %>% 
+  filter_index('2010-01' ~ .) %>% 
+  model(ets = ETS(energy_total ~ season(method = 'M') + trend(method = 'A')))
+
+energy_forecast <- energy_fit %>% 
+  forecast(h = '5 years')
+
+energy_forecast %>% 
+  autoplot(energy_ts)
+```
+
+```{r}
+
+energy_predicted <- energy_fit %>% 
+  broom::augment()
+
+ggplot(energy_predicted) +
+  geom_line(aes(x = date, y = energy_total)) +
+  geom_line(aes(x = date, y = .fitted), color = 'red', aplha = .7)
+
+ggplot(energy_predicted, aes(x = .resid))
+```
+
